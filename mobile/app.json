@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "WakyTalky",
+    "slug": "wakytalky",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#3d5a80"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.wakytalky.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#3d5a80"
+      },
+      "package": "com.wakytalky.app"
+    },
+    "extra": {
+      "apiUrl": "https://whatsdown.up.railway.app",
+      "wsUrl": "wss://whatsdown.up.railway.app"
+    }
+  }
+}
