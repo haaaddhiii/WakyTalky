@@ -596,6 +596,16 @@ function App() {
     profilesChannelRef.current?.unsubscribe();
     if (realtimeRetryRef.current) clearTimeout(realtimeRetryRef.current);
 
+    // supabase-js only auto-wires the realtime JWT on SIGNED_IN / TOKEN_REFRESHED.
+    // On INITIAL_SESSION (page reload with an existing session) the socket still
+    // holds the anon key, so RLS sees auth.uid()=NULL and every postgres_changes
+    // subscription on messages/typing_indicators times out. Push the current
+    // access token in before we subscribe.
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.access_token) {
+      supabase.realtime.setAuth(session.access_token);
+    }
+
     messagesChannelRef.current = supabase
       .channel(`user-${userId}-${Date.now()}`)
       // Incoming messages from other users
