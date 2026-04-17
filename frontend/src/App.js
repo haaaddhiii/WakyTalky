@@ -54,11 +54,13 @@ function App() {
   const publicKeyCache = useRef(new Map());
   const typingTimeoutRef = useRef(null);
   const otherTypingTimeoutRef = useRef(null);
+  const typingActiveRef = useRef(false);
   const messagesEndRef = useRef(null);
   const messagesContainerRef = useRef(null);
   const selectedContactRef = useRef(null);
   const typingChannelRef = useRef(null);
   const messagesChannelRef = useRef(null);
+  const profilesChannelRef = useRef(null);
   const currentUserIdRef = useRef(null);
   const forceScrollRef = useRef(false);
   const realtimeRetryRef = useRef(null);
@@ -175,49 +177,95 @@ function App() {
       const savedPriv = localStorage.getItem(`wt_privkey_${currentUserId}`);
       const savedPub  = localStorage.getItem(`wt_pubkey_${currentUserId}`);
 
+      // Always fetch the remote profile first so we can compare local vs remote keys
+      // before doing anything destructive.
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('identity_key, wrapped_private_key')
+        .eq('id', currentUserId)
+        .single();
+
+      // If we couldn't read the profile (network flake, RLS error, etc.) we must
+      // NOT fall through to any branch that writes identity_key or generates a
+      // new keypair — doing so on a transient failure would permanently destroy
+      // message history.
+      if (profileError || !profile) {
+        console.error('Failed to load profile during key init:', profileError);
+        if (savedPriv && savedPub && !privateKeyRef.current) {
+          // At least make the existing local keys usable for this session.
+          try {
+            privateKeyRef.current = await cryptoRef.current.importPrivateKey(savedPriv);
+            publicKeyCache.current.set(currentUserId, savedPub);
+          } catch (importErr) {
+            console.error('Failed to import local private key:', importErr);
+          }
+        }
+        showToast('Could not reach server to verify keys. Some features may be limited.', 'error');
+        return;
+      }
+
+      const remoteKey = profile.identity_key;
+      const remoteKeyIsReal = remoteKey && remoteKey !== 'dummy';
+
       if (savedPriv && savedPub) {
-        // Skip re-import and DB write if handleLogin already initialised the key this session.
         if (!privateKeyRef.current) {
           privateKeyRef.current = await cryptoRef.current.importPrivateKey(savedPriv);
           publicKeyCache.current.set(currentUserId, savedPub);
+        }
+        // Only write identity_key to the DB if it is missing or a placeholder.
+        // Overwriting a real remote key with a stale/mismatched local copy would
+        // permanently break decryption of every past message.
+        if (!remoteKeyIsReal) {
           await supabase.from('profiles').update({ identity_key: savedPub }).eq('id', currentUserId);
+        } else if (remoteKey !== savedPub) {
+          // Local pubkey disagrees with what the server has.  Trust the server and
+          // refuse to decrypt with the local copy — the user must re-authenticate to
+          // unwrap the real key.
+          console.warn('Local public key does not match profile identity_key; clearing local keys.');
+          localStorage.removeItem(`wt_privkey_${currentUserId}`);
+          localStorage.removeItem(`wt_pubkey_${currentUserId}`);
+          privateKeyRef.current = null;
+          showToast(
+            'Encryption keys on this device do not match your account. Sign out and sign back in to restore them.',
+            'error'
+          );
         }
         loadRecentContacts(currentUserId);
+      } else if (profile?.wrapped_private_key) {
+        // Wrapped key exists on the server but we have nothing locally. Unwrapping
+        // needs the login password, which we don't have here.
+        showToast(
+          'Encryption keys not found locally. Sign out and sign back in to restore them.',
+          'info'
+        );
+        loadRecentContacts(currentUserId);
+      } else if (remoteKeyIsReal) {
+        // Server has an identity_key but no wrapped private key. Generating a fresh
+        // pair here would silently replace it and lock the user out of their own
+        // history. Stop and surface the problem instead.
+        console.error('Profile has identity_key but no wrapped_private_key; refusing to overwrite.');
+        showToast(
+          'Encryption keys cannot be restored on this device. Sign out and sign back in with your password.',
+          'error'
+        );
+        loadRecentContacts(currentUserId);
       } else {
-        // No local keys — check whether a wrapped key exists in the profile BEFORE
-        // generating a new pair.  Generating fresh would overwrite the user's identity
-        // key in the database and permanently break decryption of all existing messages
-        // (hit in incognito mode and on new devices that still have an active session).
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('identity_key, wrapped_private_key')
-          .eq('id', currentUserId)
-          .single();
-
-        if (profile?.wrapped_private_key) {
-          // The real key is recoverable from the server, but unwrapping it requires the
-          // login password which is not available here.  Tell the user to re-authenticate.
-          showToast(
-            'Encryption keys not found locally. Sign out and sign back in to restore them.',
-            'info'
-          );
-          loadRecentContacts(currentUserId);
-        } else {
-          // Truly no wrapped key (brand-new account before first login completes, or very
-          // old account) — safe to generate a fresh pair.
-          const keyPair = await cryptoRef.current.generateKeyPair();
-          const pub  = await cryptoRef.current.exportPublicKey(keyPair.publicKey);
-          const priv = await cryptoRef.current.exportPrivateKey(keyPair.privateKey);
-          localStorage.setItem(`wt_privkey_${currentUserId}`, priv);
-          localStorage.setItem(`wt_pubkey_${currentUserId}`, pub);
-          privateKeyRef.current = keyPair.privateKey;
-          publicKeyCache.current.set(currentUserId, pub);
-          await supabase.from('profiles').update({ identity_key: pub }).eq('id', currentUserId);
-        }
+        // Truly fresh account — no remote key, no wrapped key. Safe to generate.
+        const keyPair = await cryptoRef.current.generateKeyPair();
+        const pub  = await cryptoRef.current.exportPublicKey(keyPair.publicKey);
+        const priv = await cryptoRef.current.exportPrivateKey(keyPair.privateKey);
+        localStorage.setItem(`wt_privkey_${currentUserId}`, priv);
+        localStorage.setItem(`wt_pubkey_${currentUserId}`, pub);
+        privateKeyRef.current = keyPair.privateKey;
+        publicKeyCache.current.set(currentUserId, pub);
+        await supabase.from('profiles').update({ identity_key: pub }).eq('id', currentUserId);
       }
     };
 
     initKeys().catch(err => console.error('Key init failed:', err));
+  // loadRecentContacts and showToast are stable useCallback refs — adding them
+  // as deps would re-run this initialiser on every render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUserId]);
 
   // Scroll on new messages
@@ -256,7 +304,25 @@ function App() {
     }
   }, [currentUser]);
 
-  useEffect(() => { selectedContactRef.current = selectedContact; }, [selectedContact]);
+  useEffect(() => {
+    const prev = selectedContactRef.current;
+    selectedContactRef.current = selectedContact;
+    // When the active conversation changes, clear any "typing" we left on the
+    // previous recipient so they don't see a stale indicator hanging around
+    // until their client-side 3s timeout lapses.
+    if (prev && prev.id !== selectedContact?.id && typingActiveRef.current) {
+      typingActiveRef.current = false;
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      if (currentUserIdRef.current) {
+        supabase.from('typing_indicators').upsert({
+          sender_id: currentUserIdRef.current,
+          recipient_id: prev.id,
+          is_typing: false,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'sender_id,recipient_id' }).then(() => {}, () => {});
+      }
+    }
+  }, [selectedContact]);
   useEffect(() => { currentUserIdRef.current = currentUserId; }, [currentUserId]);
 
   useEffect(() => {
@@ -267,6 +333,7 @@ function App() {
       if (otherTypingTimeoutRef.current) clearTimeout(otherTypingTimeoutRef.current);
       typingChannelRef.current?.unsubscribe();
       messagesChannelRef.current?.unsubscribe();
+      profilesChannelRef.current?.unsubscribe();
     };
   }, []);
 
@@ -442,13 +509,96 @@ function App() {
     }
   }, []);
 
+  // Applied to message rows the user sent — picks up read/delivered/deleted
+  // changes made by the recipient (or by the sender on another device).
+  const handleMessageUpdate = useCallback((updated) => {
+    setMessages(prev => prev.map(m => {
+      if (m.id !== updated.id) return m;
+      const next = {
+        ...m,
+        read: updated.read,
+        delivered: updated.delivered
+      };
+      if (updated.deleted_at && !m.deleted) {
+        next.deleted = true;
+        next.text = null;
+      }
+      return next;
+    }));
+    if (updated.deleted_at) {
+      // Keep the sidebar's "last message" preview in sync with deletions.
+      setContacts(prev => prev.map(c => {
+        const partnerId = updated.sender_id === currentUserIdRef.current
+          ? updated.recipient_id : updated.sender_id;
+        if (c.id !== partnerId) return c;
+        return { ...c, lastMessage: 'This message was deleted' };
+      }));
+    }
+  }, []);
+
+  // A message inserted while this device was online, but sent FROM this user on
+  // another device. Decrypt the sender copy and sync it into the UI.
+  const handleOwnMessageFromOtherDevice = useCallback(async (msg) => {
+    try {
+      if (!privateKeyRef.current || !msg.ephemeral_key || !msg.encrypted_content_sender) return;
+      const plaintext = await cryptoRef.current.decryptSenderCopy(
+        msg.encrypted_content_sender, msg.iv, privateKeyRef.current,
+        msg.ephemeral_key, msg.message_number
+      );
+      const isCurrentChat = msg.recipient_id === selectedContactRef.current?.id;
+      if (isCurrentChat) {
+        setMessages(prev => {
+          // Dedupe against both the final id and any optimistic entry we may
+          // already hold for this send (matched by message_number, since the
+          // optimistic temp id won't match the server-assigned uuid).
+          const existingIdx = prev.findIndex(m =>
+            m.id === msg.id ||
+            (m.message_number != null && m.message_number === msg.message_number)
+          );
+          if (existingIdx !== -1) {
+            const updated = [...prev];
+            updated[existingIdx] = {
+              ...prev[existingIdx],
+              id: msg.id,
+              message_number: msg.message_number,
+              sending: false,
+              read: msg.read,
+              delivered: msg.delivered,
+              deleted: !!msg.deleted_at
+            };
+            return updated;
+          }
+          return [...prev, {
+            id: msg.id,
+            message_number: msg.message_number,
+            from: msg.sender_id,
+            text: plaintext,
+            timestamp: new Date(msg.created_at),
+            read: msg.read,
+            delivered: msg.delivered,
+            deleted: !!msg.deleted_at
+          }];
+        });
+      }
+      setContacts(prev => prev.map(c =>
+        c.id === msg.recipient_id
+          ? { ...c, lastMessage: plaintext, lastMessageTime: new Date(msg.created_at) }
+          : c
+      ));
+    } catch (err) {
+      console.error('Failed to decrypt own message from other device:', err);
+    }
+  }, []);
+
   const setupRealtime = useCallback(async (userId) => {
     messagesChannelRef.current?.unsubscribe();
     typingChannelRef.current?.unsubscribe();
+    profilesChannelRef.current?.unsubscribe();
     if (realtimeRetryRef.current) clearTimeout(realtimeRetryRef.current);
 
     messagesChannelRef.current = supabase
       .channel(`user-${userId}-${Date.now()}`)
+      // Incoming messages from other users
       .on('postgres_changes', {
         event: 'INSERT',
         schema: 'public',
@@ -459,7 +609,33 @@ function App() {
         if (msg.sender_id === userId) return;
         const isCurrentChat = msg.sender_id === selectedContactRef.current?.id;
         await handleNewMessage(msg, msg.sender_id, isCurrentChat);
+        // Mark incoming messages as delivered on the server.
+        supabase.rpc('mark_messages_delivered', { p_recipient_id: userId }).then(
+          () => {}, () => {}
+        );
       })
+      // Messages we SENT, arriving here via another device
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `sender_id=eq.${userId}`
+      }, async (payload) => {
+        await handleOwnMessageFromOtherDevice(payload.new);
+      })
+      // Message UPDATEs — read receipts, delivered flag, deletions
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'messages',
+        filter: `sender_id=eq.${userId}`
+      }, (payload) => handleMessageUpdate(payload.new))
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'messages',
+        filter: `recipient_id=eq.${userId}`
+      }, (payload) => handleMessageUpdate(payload.new))
       .subscribe((status, err) => {
         if (status === 'CHANNEL_ERROR') {
           console.error('[REALTIME] Messages error:', err);
@@ -471,29 +647,67 @@ function App() {
         }
       });
 
+    // Typing indicators — listen to INSERT as well as UPDATE, because the very
+    // first typing event between two users creates the row via upsert.
+    const onTypingEvent = (payload) => {
+      const typing = payload.new;
+      if (!typing || typing.sender_id !== selectedContactRef.current?.id) return;
+      setOtherUserTyping(!!typing.is_typing);
+      if (typing.is_typing) {
+        if (otherTypingTimeoutRef.current) clearTimeout(otherTypingTimeoutRef.current);
+        otherTypingTimeoutRef.current = setTimeout(() => setOtherUserTyping(false), 3000);
+      }
+    };
+
     typingChannelRef.current = supabase
       .channel(`typing-${userId}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'typing_indicators',
+        filter: `recipient_id=eq.${userId}`
+      }, onTypingEvent)
       .on('postgres_changes', {
         event: 'UPDATE',
         schema: 'public',
         table: 'typing_indicators',
         filter: `recipient_id=eq.${userId}`
-      }, (payload) => {
-        const typing = payload.new;
-        if (typing.sender_id !== selectedContactRef.current?.id) return;
-        setOtherUserTyping(typing.is_typing);
-        if (typing.is_typing) {
-          if (otherTypingTimeoutRef.current) clearTimeout(otherTypingTimeoutRef.current);
-          otherTypingTimeoutRef.current = setTimeout(() => setOtherUserTyping(false), 3000);
-        }
-      })
+      }, onTypingEvent)
       .subscribe((status, err) => {
         if (status === 'CHANNEL_ERROR') console.error('[REALTIME] Typing error:', err);
       });
-  }, [handleNewMessage]);
+
+    // Invalidate the local public-key cache when a contact rotates their
+    // identity_key, so the next send doesn't encrypt to a stale public key
+    // that the recipient can no longer decrypt.
+    profilesChannelRef.current = supabase
+      .channel(`profiles-${userId}`)
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'profiles'
+      }, (payload) => {
+        const { id, identity_key } = payload.new || {};
+        if (!id || id === userId) return;
+        if (!publicKeyCache.current.has(id)) return;
+        if (identity_key && identity_key !== 'dummy') {
+          publicKeyCache.current.set(id, identity_key);
+        } else {
+          publicKeyCache.current.delete(id);
+        }
+      })
+      .subscribe((status, err) => {
+        if (status === 'CHANNEL_ERROR') console.error('[REALTIME] Profiles error:', err);
+      });
+  }, [handleNewMessage, handleMessageUpdate, handleOwnMessageFromOtherDevice]);
 
   useEffect(() => {
-    if (currentUserId) setupRealtime(currentUserId);
+    if (!currentUserId) return;
+    setupRealtime(currentUserId);
+    // Flip delivered=true for any messages the user received while offline.
+    supabase.rpc('mark_messages_delivered', { p_recipient_id: currentUserId }).then(
+      () => {}, () => {}
+    );
   }, [currentUserId, setupRealtime]);
 
   // ─── Auth handlers ────────────────────────────────────────────────────────
@@ -519,11 +733,14 @@ function App() {
       const { wrapped, wiv, salt } = await crypto.wrapPrivateKey(keyPair.privateKey, password);
       const wrappedData = JSON.stringify({ wrapped, wiv, salt });
 
+      // Pass wrappedPrivateKey through user_metadata so the handle_new_user trigger
+      // writes it to the profile row even when email confirmation is enabled and
+      // no session is available to us on this side of signUp.
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
-          data: { username, identityKey: publicKeyBase64 }
+          data: { username, identityKey: publicKeyBase64, wrappedPrivateKey: wrappedData }
         }
       });
 
@@ -565,34 +782,81 @@ function App() {
         const savedPriv = localStorage.getItem(`wt_privkey_${data.user.id}`);
         const savedPub  = localStorage.getItem(`wt_pubkey_${data.user.id}`);
 
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('identity_key, wrapped_private_key')
+          .eq('id', data.user.id)
+          .single();
+
+        // Refuse to touch keys if we can't verify the server's state — the
+        // alternative is silently overwriting identity_key on a transient error.
+        if (profileError || !profile) {
+          throw new Error('Could not load your profile. Please check your connection and try again.');
+        }
+
+        const remoteKey = profile.identity_key;
+        const remoteKeyIsReal = remoteKey && remoteKey !== 'dummy';
+
         if (savedPriv && savedPub) {
+          // Local keys present. Refuse to load them if they disagree with the
+          // server — that means this device has a stale or foreign key.
+          if (remoteKeyIsReal && remoteKey !== savedPub) {
+            throw new Error(
+              'This device has an out-of-date encryption key. Please clear site data and sign in again.'
+            );
+          }
+
           privateKeyRef.current = await cryptoRef.current.importPrivateKey(savedPriv);
           publicKeyCache.current.set(data.user.id, savedPub);
-          await supabase.from('profiles').update({ identity_key: savedPub }).eq('id', data.user.id);
-        } else {
-          const { data: profile } = await supabase
-            .from('profiles')
-            .select('identity_key, wrapped_private_key')
-            .eq('id', data.user.id)
-            .single();
 
-          if (profile?.wrapped_private_key) {
-            try {
-              const { wrapped, wiv, salt } = JSON.parse(profile.wrapped_private_key);
-              const recoveredKey = await cryptoRef.current.unwrapPrivateKey(wrapped, wiv, salt, password);
-              const privB64 = await cryptoRef.current.exportPrivateKey(recoveredKey);
-              const pubB64  = profile.identity_key;
-              localStorage.setItem(`wt_privkey_${data.user.id}`, privB64);
-              localStorage.setItem(`wt_pubkey_${data.user.id}`, pubB64);
-              privateKeyRef.current = recoveredKey;
-              publicKeyCache.current.set(data.user.id, pubB64);
-            } catch (unwrapErr) {
-              console.warn('Key unwrap failed, generating fresh keypair:', unwrapErr);
-              await generateAndSaveNewPair(data.user.id, password);
-            }
-          } else {
-            await generateAndSaveNewPair(data.user.id, password);
+          if (!remoteKeyIsReal) {
+            await supabase.from('profiles').update({ identity_key: savedPub }).eq('id', data.user.id);
           }
+
+          // Backfill wrapped_private_key if the server never got one (e.g. user
+          // registered before the trigger wrote it, or email-confirmation path).
+          if (!profile?.wrapped_private_key) {
+            try {
+              const { wrapped, wiv, salt } = await cryptoRef.current.wrapPrivateKey(
+                privateKeyRef.current, password
+              );
+              await supabase.from('profiles').update({
+                wrapped_private_key: JSON.stringify({ wrapped, wiv, salt })
+              }).eq('id', data.user.id);
+            } catch (wrapErr) {
+              console.warn('Failed to backfill wrapped_private_key:', wrapErr);
+            }
+          }
+        } else if (profile?.wrapped_private_key) {
+          // No local keys — recover from the password-wrapped copy.
+          try {
+            const { wrapped, wiv, salt } = JSON.parse(profile.wrapped_private_key);
+            const recoveredKey = await cryptoRef.current.unwrapPrivateKey(wrapped, wiv, salt, password);
+            const privB64 = await cryptoRef.current.exportPrivateKey(recoveredKey);
+            const pubB64  = profile.identity_key;
+            localStorage.setItem(`wt_privkey_${data.user.id}`, privB64);
+            localStorage.setItem(`wt_pubkey_${data.user.id}`, pubB64);
+            privateKeyRef.current = recoveredKey;
+            publicKeyCache.current.set(data.user.id, pubB64);
+          } catch (unwrapErr) {
+            // DO NOT silently generate a new keypair here — that would overwrite
+            // the profile's identity_key and destroy all past message decryption.
+            console.error('Key unwrap failed:', unwrapErr);
+            throw new Error(
+              'Could not recover your encryption keys. The stored key may be corrupted.'
+            );
+          }
+        } else if (remoteKeyIsReal) {
+          // Server has a real identity_key but no wrapped private key. Generating
+          // fresh here would orphan every message ever sent to this user.
+          throw new Error(
+            'Your encryption keys cannot be recovered on this device. ' +
+            'Previous messages will not be readable. Contact support before continuing.'
+          );
+        } else {
+          // Brand new account (no remote identity_key, no wrapped key). Safe to
+          // generate, wrap, and save.
+          await generateAndSaveNewPair(data.user.id, password);
         }
 
         setToken(data.session.access_token);
@@ -625,6 +889,7 @@ function App() {
   const handleLogout = async () => {
     messagesChannelRef.current?.unsubscribe();
     typingChannelRef.current?.unsubscribe();
+    profilesChannelRef.current?.unsubscribe();
     await supabase.auth.signOut();
     if (currentUser) localStorage.removeItem(`contacts_${currentUser}`);
     setToken(null);
@@ -696,10 +961,13 @@ function App() {
   const searchUsers = async (query) => {
     if (!query.trim()) { setSearchResults([]); return; }
     try {
+      // Escape PostgREST ilike wildcards so a user typing "%" or "_" doesn't get
+      // a wildcard match — they should only match the literal character.
+      const escaped = query.replace(/([\\%_])/g, '\\$1');
       const { data, error } = await supabase
         .from('profiles')
         .select('id, username, identity_key')
-        .ilike('username', `%${query}%`)
+        .ilike('username', `%${escaped}%`)
         .neq('id', currentUserId)
         .limit(20);
       if (error) throw error;
@@ -853,6 +1121,7 @@ function App() {
 
       const tempMessage = {
         id: tempId,
+        message_number: messageNumber,
         from: currentUserId,
         text: messageText,
         timestamp: new Date(),
@@ -865,6 +1134,14 @@ function App() {
           : contact
       ));
       setMessageInput('');
+
+      // Send is itself an "I stopped typing" signal — cancel any pending false
+      // and emit it now so the recipient's indicator clears immediately.
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      if (typingActiveRef.current) {
+        typingActiveRef.current = false;
+        sendTypingIndicator(false);
+      }
 
       const { data, error } = await supabase
         .from('messages')
@@ -921,10 +1198,29 @@ function App() {
   };
 
   const handleTyping = (e) => {
-    setMessageInput(e.target.value);
-    if (e.target.value.length > 0) sendTypingIndicator(true);
+    const value = e.target.value;
+    setMessageInput(value);
+
+    if (value.length === 0) {
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      if (typingActiveRef.current) {
+        typingActiveRef.current = false;
+        sendTypingIndicator(false);
+      }
+      return;
+    }
+
+    // Only fire `true` on the edge (first keystroke or after a pause). The stop
+    // signal is sent by a trailing timer once the user has been idle for 2s.
+    if (!typingActiveRef.current) {
+      typingActiveRef.current = true;
+      sendTypingIndicator(true);
+    }
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = setTimeout(() => sendTypingIndicator(false), 1000);
+    typingTimeoutRef.current = setTimeout(() => {
+      typingActiveRef.current = false;
+      sendTypingIndicator(false);
+    }, 2000);
   };
 
   const handleFileUpload = async (event) => {

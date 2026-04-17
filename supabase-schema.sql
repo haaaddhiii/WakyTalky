@@ -152,17 +152,22 @@ CREATE POLICY "Users can read encrypted media"
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
-  INSERT INTO public.profiles (id, username, identity_key, signed_pre_key, one_time_pre_keys)
+  -- wrapped_private_key is read from metadata so that sign-ups requiring email
+  -- confirmation (no session yet) still get the password-wrapped key persisted.
+  -- Without this, the client can't save it post-signup and cross-device
+  -- recovery silently breaks.
+  INSERT INTO public.profiles (id, username, identity_key, signed_pre_key, one_time_pre_keys, wrapped_private_key)
   VALUES (
     NEW.id,
     COALESCE(NEW.raw_user_meta_data->>'username', split_part(NEW.email, '@', 1)),
     COALESCE(NEW.raw_user_meta_data->>'identityKey', 'dummy'),
     COALESCE(NEW.raw_user_meta_data->>'signedPreKey', 'dummy'),
-    COALESCE(NEW.raw_user_meta_data->'oneTimePreKeys', '[]'::jsonb)
+    COALESCE(NEW.raw_user_meta_data->'oneTimePreKeys', '[]'::jsonb),
+    NEW.raw_user_meta_data->>'wrappedPrivateKey'
   );
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';
 
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
@@ -179,7 +184,7 @@ BEGIN
   SET delivered = true
   WHERE recipient_id = p_recipient_id AND delivered = false;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';
 
 -- ============================================
 -- FUNCTION: Mark messages as read
@@ -191,7 +196,7 @@ BEGIN
   SET read = true
   WHERE id = ANY(p_message_ids) AND recipient_id = auth.uid();
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';
 
 -- ============================================
 -- FUNCTION: Soft-delete a sent message
@@ -206,7 +211,7 @@ BEGIN
     AND sender_id = auth.uid()
     AND deleted_at IS NULL;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';
 
 -- ============================================
 -- TRIGGER: Rate limit messages (max 30/min per user)
@@ -227,7 +232,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';
 
 CREATE TRIGGER enforce_message_rate_limit
   BEFORE INSERT ON public.messages
