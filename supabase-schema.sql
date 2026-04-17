@@ -130,6 +130,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.profiles;
 -- policies on change events and the subscription will always time out.
 ALTER TABLE public.messages REPLICA IDENTITY FULL;
 ALTER TABLE public.typing_indicators REPLICA IDENTITY FULL;
+ALTER TABLE public.profiles REPLICA IDENTITY FULL;
 
 -- ============================================
 -- STORAGE BUCKET FOR ENCRYPTED MEDIA
