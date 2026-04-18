@@ -628,9 +628,18 @@ function App() {
         if (msg.recipient_id === userId) {
           const isCurrentChat = msg.sender_id === selectedContactRef.current?.id;
           await handleNewMessage(msg, msg.sender_id, isCurrentChat);
-          supabase.rpc('mark_messages_delivered', { p_recipient_id: userId }).then(
-            () => {}, () => {}
-          );
+          if (isCurrentChat) {
+            // Recipient is actively viewing the chat — mark read immediately
+            // so the sender's "read" tick flips live, not only on next open.
+            supabase.from('messages').update({ read: true }).eq('id', msg.id).then(
+              () => notify(msg.sender_id, 'message_update', { id: msg.id }),
+              () => {}
+            );
+          } else {
+            supabase.rpc('mark_messages_delivered', { p_recipient_id: userId }).then(
+              () => {}, () => {}
+            );
+          }
         } else if (msg.sender_id === userId) {
           await handleOwnMessageFromOtherDevice(msg);
         }
@@ -662,7 +671,7 @@ function App() {
           realtimeRetryRef.current = setTimeout(() => setupRealtime(userId), 5000);
         }
       });
-  }, [handleNewMessage, handleMessageUpdate, handleOwnMessageFromOtherDevice]);
+  }, [handleNewMessage, handleMessageUpdate, handleOwnMessageFromOtherDevice, notify]);
 
   useEffect(() => {
     if (!currentUserId) return;
