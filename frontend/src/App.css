@@ -905,11 +905,12 @@ body {
 }
 
 .message.sent .message-status {
-  color: rgba(255, 255, 255, 0.7);
+  color: inherit;
+  font-weight: 600;
 }
 
-.dark-mode .message.sent .message-status {
-  color: rgba(0, 0, 0, 0.4);
+.message.sent .message-status.read {
+  color: var(--message-sent);
 }
 
 .online-status {

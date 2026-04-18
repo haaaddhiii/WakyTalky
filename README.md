@@ -34,12 +34,24 @@ At registration and on first login from a new device, the private key is wrapped
 
 ---
 
+## How real-time delivery works
+
+New messages, read receipts, typing indicators, and deletions are pushed via **Supabase Broadcast** — a lightweight pub/sub layer that doesn't depend on Postgres logical replication.
+
+1. Sender writes the encrypted row via REST (RLS gates the write)
+2. Sender `httpSend()`s a tiny `{ id }` notification to the recipient's user channel (POST to `/realtime/v1/api/broadcast` — no WebSocket join required)
+3. Recipient re-fetches the row via REST (RLS still gates the read) and updates the UI
+
+The database is the source of truth; broadcasts carry only the row ID — never ciphertext. This avoids the free-tier failure mode where Realtime's Postgres connection pool saturates and `postgres_changes` subscriptions time out on tenant cold-start. Typing indicators are pure broadcast (no DB row) so they leave no server-side trace.
+
+---
+
 ## Features
 
 - End-to-end encrypted messaging (ECDH P-256 + HKDF + AES-256-GCM)
 - Per-message forward secrecy via ephemeral ECDH keys
 - Multi-device key recovery via PBKDF2-wrapped key storage
-- Real-time delivery via Supabase Realtime
+- Real-time delivery via Supabase Broadcast (no Postgres replication dependency)
 - Message deletion (for everyone)
 - Typing indicators
 - Read/delivered receipts

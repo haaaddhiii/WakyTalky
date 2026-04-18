@@ -115,7 +115,7 @@ Every table has RLS enabled. Key policies:
 |---|---|---|
 | `messages` | Only sender or recipient | Sender only (insert); recipient only (delivered/read update) |
 | `profiles` | Everyone (needed for user search) | Only the profile owner |
-| `typing_indicators` | Only sender or recipient | Only sender |
+| `typing_indicators` | Only sender or recipient | Only sender (legacy table — client no longer writes to it; typing is now ephemeral broadcast) |
 
 ### Soft delete
 

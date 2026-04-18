@@ -58,9 +58,7 @@ function App() {
   const messagesEndRef = useRef(null);
   const messagesContainerRef = useRef(null);
   const selectedContactRef = useRef(null);
-  const typingChannelRef = useRef(null);
   const messagesChannelRef = useRef(null);
-  const profilesChannelRef = useRef(null);
   const currentUserIdRef = useRef(null);
   const forceScrollRef = useRef(false);
   const realtimeRetryRef = useRef(null);
@@ -314,12 +312,12 @@ function App() {
       typingActiveRef.current = false;
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
       if (currentUserIdRef.current) {
-        supabase.from('typing_indicators').upsert({
-          sender_id: currentUserIdRef.current,
-          recipient_id: prev.id,
-          is_typing: false,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'sender_id,recipient_id' }).then(() => {}, () => {});
+        // Broadcast stop-typing directly (notify() isn't in scope here yet).
+        try {
+          supabase.channel(`user-${prev.id}`)
+            .httpSend('typing', { from: currentUserIdRef.current, is_typing: false })
+            .catch(() => {});
+        } catch {}
       }
     }
   }, [selectedContact]);
@@ -331,9 +329,7 @@ function App() {
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
       if (otherTypingTimeoutRef.current) clearTimeout(otherTypingTimeoutRef.current);
-      typingChannelRef.current?.unsubscribe();
       messagesChannelRef.current?.unsubscribe();
-      profilesChannelRef.current?.unsubscribe();
     };
   }, []);
 
@@ -590,124 +586,81 @@ function App() {
     }
   }, []);
 
+  // Fire-and-forget broadcast to a recipient's user channel. Uses httpSend,
+  // which POSTs to /realtime/v1/api/broadcast — no websocket join on their
+  // channel, so we don't receive their inbound traffic just to notify them.
+  // The Realtime tenant's Postgres replication pool is NOT involved, so this
+  // works even when postgres_changes subscriptions are wedged.
+  const notify = useCallback((recipientId, event, payload) => {
+    try {
+      const ch = supabase.channel(`user-${recipientId}`);
+      ch.httpSend(event, payload).catch((err) =>
+        console.warn('[REALTIME] notify failed:', err?.message || err)
+      );
+    } catch (err) {
+      console.warn('[REALTIME] notify threw:', err);
+    }
+  }, []);
+
   const setupRealtime = useCallback(async (userId) => {
     messagesChannelRef.current?.unsubscribe();
-    typingChannelRef.current?.unsubscribe();
-    profilesChannelRef.current?.unsubscribe();
     if (realtimeRetryRef.current) clearTimeout(realtimeRetryRef.current);
 
     // supabase-js only auto-wires the realtime JWT on SIGNED_IN / TOKEN_REFRESHED.
-    // On INITIAL_SESSION (page reload with an existing session) the socket still
-    // holds the anon key, so RLS sees auth.uid()=NULL and every postgres_changes
-    // subscription on messages/typing_indicators times out. Push the current
-    // access token in before we subscribe.
+    // On INITIAL_SESSION (page reload) the socket still holds the anon key, so
+    // authenticated broadcasts would be rejected. Push the current access token
+    // in before we subscribe.
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.access_token) {
       supabase.realtime.setAuth(session.access_token);
     }
 
     messagesChannelRef.current = supabase
-      .channel(`user-${userId}-${Date.now()}`)
-      // Incoming messages from other users
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'messages',
-        filter: `recipient_id=eq.${userId}`
-      }, async (payload) => {
-        const msg = payload.new;
-        if (msg.sender_id === userId) return;
-        const isCurrentChat = msg.sender_id === selectedContactRef.current?.id;
-        await handleNewMessage(msg, msg.sender_id, isCurrentChat);
-        // Mark incoming messages as delivered on the server.
-        supabase.rpc('mark_messages_delivered', { p_recipient_id: userId }).then(
-          () => {}, () => {}
-        );
+      .channel(`user-${userId}`)
+      // new_message { id, from } — the sender broadcasts after a successful
+      // insert. Payload carries only the id; we fetch the row (RLS-protected)
+      // to get the ciphertext.
+      .on('broadcast', { event: 'new_message' }, async ({ payload }) => {
+        if (!payload?.id) return;
+        const { data: msg } = await supabase
+          .from('messages').select('*').eq('id', payload.id).single();
+        if (!msg) return;
+        if (msg.recipient_id === userId) {
+          const isCurrentChat = msg.sender_id === selectedContactRef.current?.id;
+          await handleNewMessage(msg, msg.sender_id, isCurrentChat);
+          supabase.rpc('mark_messages_delivered', { p_recipient_id: userId }).then(
+            () => {}, () => {}
+          );
+        } else if (msg.sender_id === userId) {
+          await handleOwnMessageFromOtherDevice(msg);
+        }
       })
-      // Messages we SENT, arriving here via another device
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'messages',
-        filter: `sender_id=eq.${userId}`
-      }, async (payload) => {
-        await handleOwnMessageFromOtherDevice(payload.new);
+      // message_update { id } — sender broadcasts after read/delivered/delete
+      // mutations; recipient re-fetches so RLS still gates the row.
+      .on('broadcast', { event: 'message_update' }, async ({ payload }) => {
+        if (!payload?.id) return;
+        const { data: msg } = await supabase
+          .from('messages').select('*').eq('id', payload.id).single();
+        if (msg) handleMessageUpdate(msg);
       })
-      // Message UPDATEs — read receipts, delivered flag, deletions
-      .on('postgres_changes', {
-        event: 'UPDATE',
-        schema: 'public',
-        table: 'messages',
-        filter: `sender_id=eq.${userId}`
-      }, (payload) => handleMessageUpdate(payload.new))
-      .on('postgres_changes', {
-        event: 'UPDATE',
-        schema: 'public',
-        table: 'messages',
-        filter: `recipient_id=eq.${userId}`
-      }, (payload) => handleMessageUpdate(payload.new))
+      // typing { from, is_typing } — direct state, no DB round-trip.
+      .on('broadcast', { event: 'typing' }, ({ payload }) => {
+        if (!payload || payload.from !== selectedContactRef.current?.id) return;
+        setOtherUserTyping(!!payload.is_typing);
+        if (payload.is_typing) {
+          if (otherTypingTimeoutRef.current) clearTimeout(otherTypingTimeoutRef.current);
+          otherTypingTimeoutRef.current = setTimeout(() => setOtherUserTyping(false), 3000);
+        }
+      })
       .subscribe((status, err) => {
         if (status === 'CHANNEL_ERROR') {
-          console.error('[REALTIME] Messages error:', err);
+          console.error('[REALTIME] Channel error:', err);
           realtimeRetryRef.current = setTimeout(() => setupRealtime(userId), 5000);
         }
         if (status === 'TIMED_OUT') {
-          console.warn('[REALTIME] Messages timed out, reconnecting...');
+          console.warn('[REALTIME] Channel timed out, reconnecting...');
           realtimeRetryRef.current = setTimeout(() => setupRealtime(userId), 5000);
         }
-      });
-
-    // Typing indicators — listen to INSERT as well as UPDATE, because the very
-    // first typing event between two users creates the row via upsert.
-    const onTypingEvent = (payload) => {
-      const typing = payload.new;
-      if (!typing || typing.sender_id !== selectedContactRef.current?.id) return;
-      setOtherUserTyping(!!typing.is_typing);
-      if (typing.is_typing) {
-        if (otherTypingTimeoutRef.current) clearTimeout(otherTypingTimeoutRef.current);
-        otherTypingTimeoutRef.current = setTimeout(() => setOtherUserTyping(false), 3000);
-      }
-    };
-
-    typingChannelRef.current = supabase
-      .channel(`typing-${userId}`)
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'typing_indicators',
-        filter: `recipient_id=eq.${userId}`
-      }, onTypingEvent)
-      .on('postgres_changes', {
-        event: 'UPDATE',
-        schema: 'public',
-        table: 'typing_indicators',
-        filter: `recipient_id=eq.${userId}`
-      }, onTypingEvent)
-      .subscribe((status, err) => {
-        if (status === 'CHANNEL_ERROR') console.error('[REALTIME] Typing error:', err);
-      });
-
-    // Invalidate the local public-key cache when a contact rotates their
-    // identity_key, so the next send doesn't encrypt to a stale public key
-    // that the recipient can no longer decrypt.
-    profilesChannelRef.current = supabase
-      .channel(`profiles-${userId}`)
-      .on('postgres_changes', {
-        event: 'UPDATE',
-        schema: 'public',
-        table: 'profiles'
-      }, (payload) => {
-        const { id, identity_key } = payload.new || {};
-        if (!id || id === userId) return;
-        if (!publicKeyCache.current.has(id)) return;
-        if (identity_key && identity_key !== 'dummy') {
-          publicKeyCache.current.set(id, identity_key);
-        } else {
-          publicKeyCache.current.delete(id);
-        }
-      })
-      .subscribe((status, err) => {
-        if (status === 'CHANNEL_ERROR') console.error('[REALTIME] Profiles error:', err);
       });
   }, [handleNewMessage, handleMessageUpdate, handleOwnMessageFromOtherDevice]);
 
@@ -898,8 +851,6 @@ function App() {
 
   const handleLogout = async () => {
     messagesChannelRef.current?.unsubscribe();
-    typingChannelRef.current?.unsubscribe();
-    profilesChannelRef.current?.unsubscribe();
     await supabase.auth.signOut();
     if (currentUser) localStorage.removeItem(`contacts_${currentUser}`);
     setToken(null);
@@ -1173,6 +1124,10 @@ function App() {
       setMessages(prev => prev.map(msg =>
         msg.id === tempId ? { ...msg, id: data.id, sending: false } : msg
       ));
+
+      // Notify the recipient (and our other devices) that a new message landed.
+      notify(selectedContact.id, 'new_message', { id: data.id });
+      notify(currentUserId,      'new_message', { id: data.id });
     } catch (error) {
       console.error('Failed to send message:', error);
       setMessages(prev => prev.filter(msg => !msg.sending));
@@ -1188,23 +1143,17 @@ function App() {
       setMessages(prev => prev.map(m =>
         m.id === messageId ? { ...m, deleted: true, text: null } : m
       ));
+      // Tell the recipient (and our other devices) the row changed.
+      if (selectedContact?.id) notify(selectedContact.id, 'message_update', { id: messageId });
+      notify(currentUserId, 'message_update', { id: messageId });
     } else {
       showToast('Failed to delete message');
     }
   };
 
-  const sendTypingIndicator = async (isTyping) => {
+  const sendTypingIndicator = (isTyping) => {
     if (!selectedContact || !currentUserId) return;
-    try {
-      await supabase.from('typing_indicators').upsert({
-        sender_id: currentUserId,
-        recipient_id: selectedContact.id,
-        is_typing: isTyping,
-        updated_at: new Date().toISOString()
-      }, { onConflict: 'sender_id,recipient_id' });
-    } catch (error) {
-      console.error('Failed to send typing indicator:', error);
-    }
+    notify(selectedContact.id, 'typing', { from: currentUserId, is_typing: isTyping });
   };
 
   const handleTyping = (e) => {
@@ -1253,6 +1202,8 @@ function App() {
       setContacts(prev => prev.map(contact =>
         contact.id === contactId ? { ...contact, unread: 0 } : contact
       ));
+      // Tell the sender to refresh these rows so their read receipts flip live.
+      unreadIds.forEach(id => notify(contactId, 'message_update', { id }));
     } catch (error) {
       console.error('Failed to mark messages as read:', error);
     }
@@ -1654,7 +1605,7 @@ function App() {
                           <div className="message-time">
                             {msg.timestamp?.toLocaleTimeString?.([], { hour: '2-digit', minute: '2-digit' }) ?? ''}
                             {msg.from === currentUserId && !msg.deleted && (
-                              <span className="message-status">
+                              <span className={`message-status${msg.read ? ' read' : ''}`}>
                                 {msg.sending ? ' sending' : msg.read ? ' read' : msg.delivered ? ' delivered' : ' sent'}
                               </span>
                             )}
