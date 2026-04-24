@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://wakytalky.vercel.app/sitemap.xml

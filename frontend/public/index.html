@@ -3,14 +3,57 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+
+    <!-- Primary meta -->
+    <title>WakyTalky — Free End-to-End Encrypted Messaging</title>
+    <meta name="description" content="WakyTalky is a free, open-source end-to-end encrypted messaging app. Your messages are encrypted on your device before they leave — the server never sees plaintext." />
+    <meta name="keywords" content="encrypted messaging, end-to-end encryption, private chat, secure messaging, E2EE, encrypted chat app" />
+    <meta name="author" content="WakyTalky" />
     <meta name="theme-color" content="#faf8f5" />
-    <meta
-      name="description"
-      content="Waky Talky - End-to-end encrypted messaging app"
-    />
+    <link rel="canonical" href="https://wakytalky.vercel.app/" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://wakytalky.vercel.app/" />
+    <meta property="og:title" content="WakyTalky — Free End-to-End Encrypted Messaging" />
+    <meta property="og:description" content="WakyTalky is a free, open-source end-to-end encrypted messaging app. Your messages are encrypted on your device before they leave — the server never sees plaintext." />
+    <meta property="og:site_name" content="WakyTalky" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="WakyTalky — Free End-to-End Encrypted Messaging" />
+    <meta name="twitter:description" content="Free encrypted messaging. Your messages are encrypted on your device — the server stores only ciphertext and never sees plaintext." />
+
+    <!-- Structured data -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebApplication",
+      "name": "WakyTalky",
+      "url": "https://wakytalky.vercel.app/",
+      "description": "Free, open-source end-to-end encrypted messaging app. Messages are encrypted on your device before they leave — the server never sees plaintext.",
+      "applicationCategory": "CommunicationApplication",
+      "operatingSystem": "Any",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "featureList": [
+        "End-to-end encryption (ECDH P-256 + AES-256-GCM)",
+        "Per-message forward secrecy via ephemeral keys",
+        "Real-time delivery",
+        "Read and delivered receipts",
+        "Typing indicators",
+        "Message deletion",
+        "Multi-device key recovery",
+        "Dark mode"
+      ]
+    }
+    </script>
+
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
-    <title>WakyTalky</title>
-    
+
     <!-- Import Simplified E2E Encryption Library -->
     <script src="%PUBLIC_URL%/simpleCrypto.js"></script>
   </head>
