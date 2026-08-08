@@ -79,6 +79,15 @@ CREATE POLICY "Users can update messages received"
   ON public.messages FOR UPDATE
   USING (auth.uid() = recipient_id);
 
+-- Senders can soft-delete (set deleted_at) on messages they sent.
+-- Column-level restriction (deleted_at only, delivered/read only for
+-- recipients) is enforced by the enforce_message_update_columns trigger
+-- below — RLS alone can't express "only this column may change".
+CREATE POLICY "Users can soft-delete own sent messages"
+  ON public.messages FOR UPDATE
+  USING (auth.uid() = sender_id)
+  WITH CHECK (auth.uid() = sender_id);
+
 -- ============================================
 -- TYPING INDICATORS TABLE (ephemeral)
 -- ============================================
@@ -177,15 +186,21 @@ CREATE TRIGGER on_auth_user_created
 
 -- ============================================
 -- FUNCTION: Mark messages as delivered
+-- p_recipient_id is no longer trusted as-is: previously this had no
+-- auth check at all, so any authenticated caller could pass someone
+-- else's id and flip their delivery flags. Now scoped to auth.uid()
+-- and no longer SECURITY DEFINER, so the "Users can update messages
+-- received" RLS policy (recipient-only) enforces it too — same
+-- belt-and-suspenders pattern as delete_message above.
 -- ============================================
 CREATE OR REPLACE FUNCTION public.mark_messages_delivered(p_recipient_id UUID)
 RETURNS void AS $$
 BEGIN
   UPDATE public.messages
   SET delivered = true
-  WHERE recipient_id = p_recipient_id AND delivered = false;
+  WHERE recipient_id = auth.uid() AND recipient_id = p_recipient_id AND delivered = false;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';
+$$ LANGUAGE plpgsql SET search_path = '';
 
 -- ============================================
 -- FUNCTION: Mark messages as read
@@ -200,8 +215,71 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';
 
 -- ============================================
+-- TRIGGER: Restrict which columns each side of a message
+-- may change on UPDATE. RLS policies only gate row visibility,
+-- not column contents, so without this a sender-side UPDATE
+-- policy would let a sender rewrite encrypted_content after
+-- delivery, and the existing recipient policy would let a
+-- recipient rewrite anything on a message addressed to them.
+-- ============================================
+CREATE OR REPLACE FUNCTION public.enforce_message_update_columns()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF auth.uid() = OLD.sender_id THEN
+    -- Senders may only soft-delete (deleted_at NULL -> now), once.
+    IF NOT (
+      OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL
+      AND NEW.sender_id = OLD.sender_id AND NEW.recipient_id = OLD.recipient_id
+      AND NEW.sender_username IS NOT DISTINCT FROM OLD.sender_username
+      AND NEW.encrypted_content = OLD.encrypted_content
+      AND NEW.encrypted_content_sender IS NOT DISTINCT FROM OLD.encrypted_content_sender
+      AND NEW.iv = OLD.iv
+      AND NEW.message_number IS NOT DISTINCT FROM OLD.message_number
+      AND NEW.ephemeral_key IS NOT DISTINCT FROM OLD.ephemeral_key
+      AND NEW.media_type IS NOT DISTINCT FROM OLD.media_type
+      AND NEW.media_url IS NOT DISTINCT FROM OLD.media_url
+      AND NEW.media_iv IS NOT DISTINCT FROM OLD.media_iv
+      AND NEW.media_size IS NOT DISTINCT FROM OLD.media_size
+      AND NEW.delivered = OLD.delivered
+      AND NEW.read = OLD.read
+      AND NEW.created_at = OLD.created_at
+    ) THEN
+      RAISE EXCEPTION 'Senders may only soft-delete their own message (deleted_at only, once)';
+    END IF;
+  ELSIF auth.uid() = OLD.recipient_id THEN
+    -- Recipients may only flip delivered/read.
+    IF NOT (
+      NEW.sender_id = OLD.sender_id AND NEW.recipient_id = OLD.recipient_id
+      AND NEW.sender_username IS NOT DISTINCT FROM OLD.sender_username
+      AND NEW.encrypted_content = OLD.encrypted_content
+      AND NEW.encrypted_content_sender IS NOT DISTINCT FROM OLD.encrypted_content_sender
+      AND NEW.iv = OLD.iv
+      AND NEW.message_number IS NOT DISTINCT FROM OLD.message_number
+      AND NEW.ephemeral_key IS NOT DISTINCT FROM OLD.ephemeral_key
+      AND NEW.media_type IS NOT DISTINCT FROM OLD.media_type
+      AND NEW.media_url IS NOT DISTINCT FROM OLD.media_url
+      AND NEW.media_iv IS NOT DISTINCT FROM OLD.media_iv
+      AND NEW.media_size IS NOT DISTINCT FROM OLD.media_size
+      AND NEW.created_at = OLD.created_at
+      AND NEW.deleted_at IS NOT DISTINCT FROM OLD.deleted_at
+    ) THEN
+      RAISE EXCEPTION 'Recipients may only update delivered/read status';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SET search_path = '';
+
+CREATE TRIGGER enforce_message_update_columns_trigger
+  BEFORE UPDATE ON public.messages
+  FOR EACH ROW EXECUTE FUNCTION public.enforce_message_update_columns();
+
+-- ============================================
 -- FUNCTION: Soft-delete a sent message
--- Only the sender can delete their own message.
+-- Only the sender can delete their own message. No longer
+-- SECURITY DEFINER: enforcement now genuinely comes from the
+-- "Users can soft-delete own sent messages" RLS policy plus the
+-- column-restriction trigger above, not from bypassing RLS.
 -- ============================================
 CREATE OR REPLACE FUNCTION public.delete_message(p_message_id UUID)
 RETURNS void AS $$
@@ -212,7 +290,7 @@ BEGIN
     AND sender_id = auth.uid()
     AND deleted_at IS NULL;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';
+$$ LANGUAGE plpgsql SET search_path = '';
 
 -- ============================================
 -- TRIGGER: Rate limit messages (max 30/min per user)
