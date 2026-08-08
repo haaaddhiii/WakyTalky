@@ -67,7 +67,7 @@ The database is the source of truth; broadcasts carry only the row ID — never 
 
 | Layer | Technology |
 |---|---|
-| Frontend | React 18, Supabase JS client |
+| Frontend | React 18, Vite, Supabase JS client |
 | Crypto | WebCrypto API (built-in browser) |
 | Backend | Supabase (Postgres + Auth + Realtime + Edge Functions) |
 | Access control | Row Level Security (RLS) |
@@ -81,16 +81,18 @@ The database is the source of truth; broadcasts carry only the row ID — never 
 ```
 wakytalky/
 ├── frontend/
+│   ├── index.html           # Vite entry HTML
+│   ├── vite.config.js
 │   ├── src/
-│   │   ├── App.js          # All app logic and UI
+│   │   ├── App.jsx          # All app logic and UI
 │   │   ├── App.css
 │   │   └── lib/
-│   │       └── supabase.js # Supabase client (reads from .env)
+│   │       └── supabase.js  # Supabase client (reads from .env)
 │   └── public/
-│       └── simpleCrypto.js # ECDH + HKDF + AES-GCM crypto library
-├── mobile/                 # React Native WebView wrapper
+│       └── simpleCrypto.js  # ECDH + HKDF + AES-GCM crypto library
+├── mobile/                  # React Native WebView wrapper
 │   └── App.js
-├── supabase-schema.sql     # Full DB schema with RLS, triggers, functions
+├── supabase-schema.sql      # Full DB schema with RLS, triggers, functions
 └── README.md
 ```
 
@@ -111,10 +113,8 @@ npm install
 2. Create `frontend/.env`
 
 ```
-REACT_APP_SUPABASE_URL=https://your-project.supabase.co
-REACT_APP_SUPABASE_ANON_KEY=your-anon-key
-CI=false
-WDS_SOCKET_PORT=0
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key
 ```
 
 3. Set up the database — paste `supabase-schema.sql` into the Supabase SQL Editor and run it.
@@ -122,7 +122,7 @@ WDS_SOCKET_PORT=0
 4. Start
 
 ```bash
-npm start
+npm run dev
 ```
 
 App runs at `http://localhost:3000`.
@@ -136,9 +136,8 @@ App runs at `http://localhost:3000`.
 1. Import the `frontend/` directory on [vercel.com](https://vercel.com)
 2. Set environment variables:
    ```
-   REACT_APP_SUPABASE_URL=https://your-project.supabase.co
-   REACT_APP_SUPABASE_ANON_KEY=your-anon-key
-   CI=false
+   VITE_SUPABASE_URL=https://your-project.supabase.co
+   VITE_SUPABASE_ANON_KEY=your-anon-key
    ```
 3. Set the root directory to `frontend`
 

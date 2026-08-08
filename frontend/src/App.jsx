@@ -3,12 +3,41 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import './App.css';
 import { supabase } from './lib/supabase';
 import LandingPage from './LandingPage';
+import Toast from './components/Toast';
+import ConfirmDialog from './components/ConfirmDialog';
+import LoginView from './components/LoginView';
+import RegisterView from './components/RegisterView';
+import Sidebar from './components/Sidebar';
+import ChatArea from './components/ChatArea';
+import SettingsModal from './components/SettingsModal';
 
 const SimpleCrypto = window.SimpleCrypto;
 
 // ─── URL ↔ view mapping ────────────────────────────────────────────────────
 const VIEW_TO_PATH = { landing: '/', login: '/login', register: '/register', chat: '/chat' };
 const PATH_TO_VIEW = { '/': 'landing', '/login': 'login', '/register': 'register', '/chat': 'chat' };
+
+// Every key-recovery decision below hinges on being able to read the profile
+// row. A single transient network blip here used to hard-stop straight into
+// "sign out and sign back in" — retry once before treating it as a real
+// failure. This does NOT change behavior for genuine mismatches (those are a
+// deliberate security stop, not a network problem).
+// Supabase Auth requires an email on every account. We collect only a
+// username, so we derive a non-routable internal address from it — this
+// never leaves the client and is never used to send mail.
+function usernameToAuthEmail(username) {
+  return `${username.trim().toLowerCase()}@wakytalky.local`;
+}
+
+async function fetchProfileWithRetry(userId, columns) {
+  const attempt = () => supabase.from('profiles').select(columns).eq('id', userId).single();
+  let result = await attempt();
+  if (result.error) {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    result = await attempt();
+  }
+  return result;
+}
 
 function App() {
   const navigate = useNavigate();
@@ -24,7 +53,6 @@ function App() {
       : (PATH_TO_VIEW[window.location.pathname] || 'landing');
   });
   const [username, setUsername] = useState('');
-  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [token, setToken] = useState(null);
@@ -177,11 +205,9 @@ function App() {
 
       // Always fetch the remote profile first so we can compare local vs remote keys
       // before doing anything destructive.
-      const { data: profile, error: profileError } = await supabase
-        .from('profiles')
-        .select('identity_key, wrapped_private_key')
-        .eq('id', currentUserId)
-        .single();
+      const { data: profile, error: profileError } = await fetchProfileWithRetry(
+        currentUserId, 'identity_key, wrapped_private_key'
+      );
 
       // If we couldn't read the profile (network flake, RLS error, etc.) we must
       // NOT fall through to any branch that writes identity_key or generates a
@@ -682,6 +708,33 @@ function App() {
     );
   }, [currentUserId, setupRealtime]);
 
+  // The channel goes quietly stale after a laptop sleep/wake, a tab spending a
+  // long time backgrounded, or a wifi drop — none of which reliably fire
+  // CHANNEL_ERROR/TIMED_OUT on their own. Re-check on the events that actually
+  // signal "we might be back": the tab regaining focus, or the network
+  // coming back online.
+  useEffect(() => {
+    if (!currentUserId) return;
+
+    const reconnectIfStale = () => {
+      const state = messagesChannelRef.current?.state;
+      if (state === 'joined' || state === 'joining') return;
+      if (realtimeRetryRef.current) clearTimeout(realtimeRetryRef.current);
+      setupRealtime(currentUserId);
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') reconnectIfStale();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('online', reconnectIfStale);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('online', reconnectIfStale);
+    };
+  }, [currentUserId, setupRealtime]);
+
   // ─── Auth handlers ────────────────────────────────────────────────────────
 
   const handleRegister = async (e) => {
@@ -694,7 +747,6 @@ function App() {
     if (!/[0-9]/.test(password)) { showToast('Password must contain at least one number'); return; }
     if (username.length < 3 || username.length > 20) { showToast('Username must be 3–20 characters'); return; }
     if (!/^[a-zA-Z0-9_]+$/.test(username)) { showToast('Username can only contain letters, numbers, and underscores'); return; }
-    if (!email.includes('@') || !email.includes('.')) { showToast('Please enter a valid email address'); return; }
 
     try {
       const crypto = cryptoRef.current;
@@ -709,7 +761,7 @@ function App() {
       // writes it to the profile row even when email confirmation is enabled and
       // no session is available to us on this side of signUp.
       const { data, error } = await supabase.auth.signUp({
-        email,
+        email: usernameToAuthEmail(username),
         password,
         options: {
           data: { username, identityKey: publicKeyBase64, wrappedPrivateKey: wrappedData }
@@ -734,7 +786,10 @@ function App() {
           setCurrentUserId(data.user.id);
           setCurrentView('chat');
         } else {
-          showToast('Account created! Check your email to confirm, then sign in.', 'success');
+          // No session means Supabase is waiting on email confirmation — but we
+          // never collect a real email, so that link can never be delivered.
+          // "Confirm email" must be disabled in the Supabase Auth settings.
+          showToast('Account created, but could not sign you in automatically. Please try signing in.', 'success');
           setCurrentView('login');
         }
       }
@@ -747,21 +802,23 @@ function App() {
   const handleLogin = async (e) => {
     e.preventDefault();
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: usernameToAuthEmail(username),
+        password
+      });
       if (error) throw error;
 
       if (data.user && data.session) {
         const savedPriv = localStorage.getItem(`wt_privkey_${data.user.id}`);
         const savedPub  = localStorage.getItem(`wt_pubkey_${data.user.id}`);
 
-        const { data: profile, error: profileError } = await supabase
-          .from('profiles')
-          .select('identity_key, wrapped_private_key')
-          .eq('id', data.user.id)
-          .single();
+        const { data: profile, error: profileError } = await fetchProfileWithRetry(
+          data.user.id, 'identity_key, wrapped_private_key'
+        );
 
         // Refuse to touch keys if we can't verify the server's state — the
         // alternative is silently overwriting identity_key on a transient error.
+        // (fetchProfileWithRetry already retried once, so this is a real failure.)
         if (profileError || !profile) {
           throw new Error('Could not load your profile. Please check your connection and try again.');
         }
@@ -884,7 +941,7 @@ function App() {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const res = await fetch(
-        `${process.env.REACT_APP_SUPABASE_URL}/functions/v1/delete-account`,
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/delete-account`,
         {
           method: 'POST',
           headers: {
@@ -1229,83 +1286,14 @@ function App() {
     return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   };
 
-  // ─── Logo SVG ─────────────────────────────────────────────────────────────
-  const LogoSVG = ({ size = 44 }) => (
-    <svg width={size} height={size} viewBox="0 0 44 44" fill="none">
-      <rect width="44" height="44" rx="12" fill="var(--accent)"/>
-      <path d="M22 12C16.48 12 12 16.48 12 22s4.48 10 10 10h5v-2h-5c-3.87 0-7.42-3.02-8-6.84C13.36 18.63 17.26 14 22 14c4.18 0 7.63 3.07 8 7.14.13 1.48-.15 2.88-.73 4.12l1.46 1.46A9.94 9.94 0 0032 22c0-5.52-4.48-10-10-10zm0 14v-4h-2v4h2z" fill="white" fillOpacity=".9"/>
-    </svg>
-  );
-
-  // ─── Toast icons ──────────────────────────────────────────────────────────
-  const toastIcons = {
-    error: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-      </svg>
-    ),
-    success: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
-      </svg>
-    ),
-    info: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
-      </svg>
-    )
-  };
-
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div className={currentView === 'chat' ? `app ${darkMode ? 'dark-mode' : ''}` : 'app'}>
 
-      {/* ── Toast notification ──────────────────────────────────────────── */}
-      {toast && (
-        <div className={`toast toast-${toast.type}`}>
-          <span className="toast-icon">{toastIcons[toast.type]}</span>
-          <span className="toast-message">{toast.message}</span>
-          <button className="toast-close" onClick={() => setToast(null)}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
-      )}
+      <Toast toast={toast} onClose={() => setToast(null)} />
 
-      {/* ── Confirm dialog ──────────────────────────────────────────────── */}
-      {confirmDialog && (
-        <div className="confirm-overlay" onClick={handleConfirmNo}>
-          <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="confirm-icon-wrap">
-              {confirmDialog.destructive ? (
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
-                  <path d="M10 11v6"/><path d="M14 11v6"/>
-                  <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
-                </svg>
-              ) : (
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-                </svg>
-              )}
-            </div>
-            <h3 className="confirm-title">{confirmDialog.title}</h3>
-            <p className="confirm-message">{confirmDialog.message}</p>
-            <div className="confirm-actions">
-              <button className="confirm-cancel" onClick={handleConfirmNo}>Cancel</button>
-              <button
-                className={`confirm-ok ${confirmDialog.destructive ? 'confirm-ok-danger' : ''}`}
-                onClick={handleConfirmYes}
-              >
-                {confirmDialog.destructive ? 'Delete' : 'Confirm'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog confirmDialog={confirmDialog} onYes={handleConfirmYes} onNo={handleConfirmNo} />
 
-      {/* ── Landing ─────────────────────────────────────────────────────── */}
       {currentView === 'landing' && (
         <LandingPage
           isLoggedIn={!!token}
@@ -1315,377 +1303,81 @@ function App() {
         />
       )}
 
-      {/* ── Login ───────────────────────────────────────────────────────── */}
       {currentView === 'login' && (
-        <div className="auth-container">
-          <div className="auth-box">
-            <button className="auth-back" onClick={() => setCurrentView('landing')} aria-label="Back to home">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
-              </svg>
-            </button>
-            <div className="auth-logo"><LogoSVG /></div>
-            <h1>WakyTalky</h1>
-            <p className="tagline">Private messaging, end-to-end encrypted</p>
-            <form onSubmit={handleLogin}>
-              <input
-                type="email"
-                placeholder="Email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-              />
-              <input
-                type="password"
-                placeholder="Password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
-              <button type="submit">Sign In</button>
-            </form>
-            <p className="switch-view">
-              Don't have an account?{' '}
-              <span onClick={() => {
-                setCurrentView('register');
-                setPassword('');
-                setConfirmPassword('');
-              }}>Create one</span>
-            </p>
-          </div>
-        </div>
+        <LoginView
+          username={username}
+          setUsername={setUsername}
+          password={password}
+          setPassword={setPassword}
+          onSubmit={handleLogin}
+          onBack={() => setCurrentView('landing')}
+          onSwitchToRegister={() => {
+            setCurrentView('register');
+            setPassword('');
+            setConfirmPassword('');
+          }}
+        />
       )}
 
-      {/* ── Register ────────────────────────────────────────────────────── */}
       {currentView === 'register' && (
-        <div className="auth-container">
-          <div className="auth-box">
-            <button className="auth-back" onClick={() => setCurrentView('landing')} aria-label="Back to home">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
-              </svg>
-            </button>
-            <div className="auth-logo"><LogoSVG /></div>
-            <h1>Create Account</h1>
-            <p className="tagline">Your keys, your privacy</p>
-            <form onSubmit={handleRegister}>
-              <input
-                type="text"
-                placeholder="Username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                required
-              />
-              <input
-                type="email"
-                placeholder="Email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-              />
-              <input
-                type="password"
-                placeholder="Password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                minLength="8"
-              />
-              <input
-                type="password"
-                placeholder="Confirm Password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                required
-                minLength="8"
-              />
-              <button type="submit">Create Account</button>
-            </form>
-            <p className="switch-view">
-              Already have an account?{' '}
-              <span onClick={() => {
-                setCurrentView('login');
-                setPassword('');
-                setConfirmPassword('');
-              }}>Sign in</span>
-            </p>
-          </div>
-        </div>
+        <RegisterView
+          username={username}
+          setUsername={setUsername}
+          password={password}
+          setPassword={setPassword}
+          confirmPassword={confirmPassword}
+          setConfirmPassword={setConfirmPassword}
+          onSubmit={handleRegister}
+          onBack={() => setCurrentView('landing')}
+          onSwitchToLogin={() => {
+            setCurrentView('login');
+            setPassword('');
+            setConfirmPassword('');
+          }}
+        />
       )}
 
-      {/* ── Chat ────────────────────────────────────────────────────────── */}
       {currentView === 'chat' && (
         <>
-          {/* Settings modal */}
           {showSettings && (
-            <div className="settings-overlay" onClick={() => setShowSettings(false)}>
-              <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
-                <div className="settings-header">
-                  <h2>Account</h2>
-                  <button className="settings-close" onClick={() => setShowSettings(false)}>
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                    </svg>
-                  </button>
-                </div>
-                <div className="settings-body">
-                  <div className="settings-row">
-                    <div className="settings-label">Username</div>
-                    <div className="settings-value">{currentUser}</div>
-                  </div>
-                  <div className="settings-section-title">Encryption keys</div>
-                  <div className="settings-row">
-                    <div className="settings-label">Key recovery</div>
-                    <div className="settings-value settings-value-hint">
-                      Stored encrypted in your profile. Sign in on another device with your password to restore your keys.
-                    </div>
-                  </div>
-                  <div className="settings-danger-zone">
-                    <div className="settings-section-title danger">Danger zone</div>
-                    <button className="settings-delete-btn" onClick={handleDeleteAccount}>
-                      Delete account
-                    </button>
-                    <p className="settings-delete-hint">
-                      Permanently deletes your account and all messages. This cannot be undone.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <SettingsModal
+              currentUser={currentUser}
+              onClose={() => setShowSettings(false)}
+              onDeleteAccount={handleDeleteAccount}
+            />
           )}
 
           <div className="chat-container">
-            {/* Sidebar */}
-            <div className={`sidebar ${selectedContact ? 'show-chat' : ''}`}>
-              <div className="sidebar-header">
-                <h2>Chats</h2>
-                <div className="sidebar-actions">
-                  <button onClick={toggleDarkMode} className="theme-toggle" title={darkMode ? 'Light mode' : 'Dark mode'}>
-                    {darkMode ? (
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
-                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-                        <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
-                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-                      </svg>
-                    ) : (
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-                      </svg>
-                    )}
-                  </button>
-                  <button onClick={() => setShowSettings(true)} className="theme-toggle" title="Account settings">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <circle cx="12" cy="12" r="3"/>
-                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                    </svg>
-                  </button>
-                  <button onClick={handleLogout} className="logout-btn">Logout</button>
-                </div>
-              </div>
+            <Sidebar
+              darkMode={darkMode}
+              toggleDarkMode={toggleDarkMode}
+              onOpenSettings={() => setShowSettings(true)}
+              onLogout={handleLogout}
+              searchQuery={searchQuery}
+              setSearchQuery={setSearchQuery}
+              searchUsers={searchUsers}
+              searchResults={searchResults}
+              currentUserId={currentUserId}
+              startChat={startChat}
+              contacts={contacts}
+              selectedContact={selectedContact}
+              formatTime={formatTime}
+            />
 
-              <div className="search-box">
-                <input
-                  type="text"
-                  placeholder="Search users..."
-                  value={searchQuery}
-                  onChange={(e) => { setSearchQuery(e.target.value); searchUsers(e.target.value); }}
-                />
-              </div>
-
-              {searchResults.length > 0 && (
-                <div className="search-results">
-                  {searchResults
-                    .filter(user => user.id !== currentUserId)
-                    .map(user => (
-                      <div key={user.id} className="contact-item" onClick={() => startChat(user)}>
-                        <div className="contact-avatar">{(user.username?.[0] ?? '?').toUpperCase()}</div>
-                        <div className="contact-info">
-                          <div className="contact-name">{user.username}</div>
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              )}
-
-              {contacts.length > 0 && (
-                <div className="section-header"><h3>Recent Chats</h3></div>
-              )}
-
-              <div className="contacts-list">
-                {contacts.length === 0 && !searchQuery && (
-                  <div className="empty-state">
-                    <p>No recent chats</p>
-                    <p className="hint">Search for users to start chatting</p>
-                  </div>
-                )}
-                {contacts
-                  .filter(contact => currentUserId && contact.id !== currentUserId)
-                  .sort((a, b) => {
-                    const timeA = a.lastMessageTime ? new Date(a.lastMessageTime) : 0;
-                    const timeB = b.lastMessageTime ? new Date(b.lastMessageTime) : 0;
-                    return timeB - timeA;
-                  })
-                  .map(contact => (
-                    <div
-                      key={contact.id}
-                      className={`contact-item ${selectedContact?.id === contact.id ? 'active' : ''}`}
-                      onClick={() => startChat(contact)}
-                    >
-                      <div className="contact-avatar">
-                        {(contact.username?.[0] ?? '?').toUpperCase()}
-                        {contact.unread > 0 && (
-                          <span className="unread-badge">{contact.unread > 9 ? '9+' : contact.unread}</span>
-                        )}
-                      </div>
-                      <div className="contact-info">
-                        <div className="contact-name-row">
-                          <div className="contact-name">{contact.username}</div>
-                          {contact.lastMessageTime && (
-                            <div className="contact-time">{formatTime(contact.lastMessageTime)}</div>
-                          )}
-                        </div>
-                        <div className="contact-last-message">
-                          {contact.lastMessage || 'Tap to chat'}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-              </div>
-            </div>
-
-            {/* Chat area */}
-            <div className={`chat-area ${!selectedContact ? 'show-sidebar' : ''}`}>
-              {selectedContact ? (
-                <>
-                  <div className="chat-header">
-                    <button className="back-button" onClick={() => setSelectedContact(null)}>
-                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="15 18 9 12 15 6"/>
-                      </svg>
-                    </button>
-                    <div className="contact-avatar">
-                      {(selectedContact.username?.[0] ?? '?').toUpperCase()}
-                    </div>
-                    <div>
-                      <div className="contact-name">{selectedContact.username}</div>
-                      <div className="encryption-status">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 4 }}>
-                          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-                        </svg>
-                        End-to-end encrypted
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="messages-container" ref={messagesContainerRef}>
-                    {messages.map((msg, index) => (
-                      <div
-                        key={msg.id || index}
-                        className={`message-wrapper ${msg.from === currentUserId ? 'sent-wrapper' : 'received-wrapper'}`}
-                      >
-                        <div
-                          className={`message ${msg.from === currentUserId ? 'sent' : 'received'} ${msg.sending ? 'sending' : ''} ${!msg.read && msg.from !== currentUserId ? 'unread' : ''}`}
-                        >
-                          <div className={`message-content ${msg.deleted ? 'deleted-msg' : ''}`}>
-                            {msg.deleted ? (
-                              <span className="deleted-text">
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 5, verticalAlign: 'middle' }}>
-                                  <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
-                                </svg>
-                                This message was deleted
-                              </span>
-                            ) : (
-                              <>
-                                {msg.text}
-                                {msg.mediaType && (
-                                  <div className="media-indicator">
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 4, verticalAlign: 'middle' }}>
-                                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
-                                    </svg>
-                                    {msg.mediaType.includes('image') ? 'Image' : 'File'}
-                                  </div>
-                                )}
-                              </>
-                            )}
-                          </div>
-                          <div className="message-time">
-                            {msg.timestamp?.toLocaleTimeString?.([], { hour: '2-digit', minute: '2-digit' }) ?? ''}
-                            {msg.from === currentUserId && !msg.deleted && (
-                              <span className={`message-status${msg.read ? ' read' : ''}`}>
-                                {msg.sending ? ' sending' : msg.read ? ' read' : msg.delivered ? ' delivered' : ' sent'}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        {msg.from === currentUserId && !msg.deleted && !msg.sending && (
-                          <button
-                            className="message-delete-btn"
-                            onClick={() => handleDeleteMessage(msg.id)}
-                            title="Delete message"
-                          >
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
-                              <path d="M10 11v6"/><path d="M14 11v6"/>
-                              <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
-                            </svg>
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                    {otherUserTyping && (
-                      <div className="typing-indicator">
-                        <span>{selectedContact.username} is typing</span>
-                        <span className="typing-dots">
-                          <span>.</span><span>.</span><span>.</span>
-                        </span>
-                      </div>
-                    )}
-                    <div ref={messagesEndRef} />
-                  </div>
-
-                  <div className="message-input-container">
-                    <label className="file-upload-btn">
-                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
-                      </svg>
-                      <input type="file" onChange={handleFileUpload} style={{ display: 'none' }} />
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="Type a message..."
-                      value={messageInput}
-                      onChange={handleTyping}
-                      onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-                    />
-                    <button onClick={sendMessage}>
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-                      </svg>
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div className="no-chat-selected">
-                  <div className="auth-logo">
-                    <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
-                      <rect width="56" height="56" rx="14" fill="var(--accent)"/>
-                      <path d="M28 16C22.48 16 18 20.48 18 26s4.48 10 10 10h5v-2h-5c-3.87 0-7.42-3.02-8-6.84C19.36 22.63 23.26 18 28 18c4.18 0 7.63 3.07 8 7.14.13 1.48-.15 2.88-.73 4.12l1.46 1.46A9.94 9.94 0 0038 26c0-5.52-4.48-10-10-10zm0 14v-4h-2v4h2z" fill="white" fillOpacity=".9"/>
-                    </svg>
-                  </div>
-                  <h2>WakyTalky</h2>
-                  <p>Select a contact or search for a user to start chatting</p>
-                  <div className="features">
-                    <div><span className="feature-icon">&#10003;</span> End-to-end encryption</div>
-                    <div><span className="feature-icon">&#10003;</span> Zero-knowledge architecture</div>
-                    <div><span className="feature-icon">&#10003;</span> Simple &amp; secure</div>
-                    <div><span className="feature-icon">&#10003;</span> Real-time messaging</div>
-                  </div>
-                </div>
-              )}
-            </div>
+            <ChatArea
+              selectedContact={selectedContact}
+              onBack={() => setSelectedContact(null)}
+              messages={messages}
+              currentUserId={currentUserId}
+              messagesContainerRef={messagesContainerRef}
+              messagesEndRef={messagesEndRef}
+              otherUserTyping={otherUserTyping}
+              handleDeleteMessage={handleDeleteMessage}
+              messageInput={messageInput}
+              handleTyping={handleTyping}
+              sendMessage={sendMessage}
+              handleFileUpload={handleFileUpload}
+            />
           </div>
         </>
       )}

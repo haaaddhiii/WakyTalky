@@ -24,6 +24,9 @@ desktop.ini
 # Claude Code
 .claude/
 
+# Vercel CLI local link
+.vercel/
+
 # IDE / editor
 .vscode/
 .idea/

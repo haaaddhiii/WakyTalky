@@ -11,6 +11,7 @@ RUN npm ci
 # Copy crypto library and source files
 COPY public/ ./public/
 COPY src/ ./src/
+COPY index.html vite.config.js ./
 
 # Build app
 RUN npm run build
