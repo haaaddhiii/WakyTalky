@@ -1,8 +1,13 @@
 export default function Logo({ size = 44 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 44 44" fill="none">
-      <rect width="44" height="44" rx="12" fill="var(--accent)"/>
-      <path d="M22 12C16.48 12 12 16.48 12 22s4.48 10 10 10h5v-2h-5c-3.87 0-7.42-3.02-8-6.84C13.36 18.63 17.26 14 22 14c4.18 0 7.63 3.07 8 7.14.13 1.48-.15 2.88-.73 4.12l1.46 1.46A9.94 9.94 0 0032 22c0-5.52-4.48-10-10-10zm0 14v-4h-2v4h2z" fill="white" fillOpacity=".9"/>
+      <rect width="44" height="44" rx="8" fill="var(--accent)" />
+      <line x1="27" y1="12" x2="32.5" y2="4.5" stroke="white" strokeOpacity=".9" strokeWidth="2.5" strokeLinecap="round" />
+      <rect x="12" y="12" width="17" height="24" rx="3" fill="white" fillOpacity=".92" />
+      <rect x="15.5" y="15.5" width="10" height="6" rx="1" fill="var(--accent)" />
+      <line x1="15.5" y1="26" x2="25.5" y2="26" stroke="var(--accent)" strokeWidth="1.6" strokeLinecap="round" />
+      <line x1="15.5" y1="29.5" x2="25.5" y2="29.5" stroke="var(--accent)" strokeWidth="1.6" strokeLinecap="round" />
+      <circle cx="20.5" cy="33" r="1.6" fill="var(--accent)" />
     </svg>
   );
 }

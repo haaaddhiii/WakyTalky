@@ -1,16 +1,17 @@
 import React from 'react';
 import './LandingPage.css';
 
-/* ── Inline logo (matches App.js LogoSVG) ───────────────────────────────────── */
+/* ── Inline logo (walkie-talkie handset glyph, matches Logo.jsx) ───────────── */
 function LandingLogo({ size = 32 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 44 44" fill="none">
-      <rect width="44" height="44" rx="12" fill="var(--accent)"/>
-      <path
-        d="M22 12C16.48 12 12 16.48 12 22s4.48 10 10 10h5v-2h-5c-3.87 0-7.42-3.02-8-6.84C13.36 18.63 17.26 14 22 14c4.18 0 7.63 3.07 8 7.14.13 1.48-.15 2.88-.73 4.12l1.46 1.46A9.94 9.94 0 0032 22c0-5.52-4.48-10-10-10zm0 14v-4h-2v4h2z"
-        fill="white"
-        fillOpacity=".9"
-      />
+      <rect width="44" height="44" rx="8" fill="var(--accent)"/>
+      <line x1="27" y1="12" x2="32.5" y2="4.5" stroke="white" strokeOpacity=".9" strokeWidth="2.5" strokeLinecap="round"/>
+      <rect x="12" y="12" width="17" height="24" rx="3" fill="white" fillOpacity=".92"/>
+      <rect x="15.5" y="15.5" width="10" height="6" rx="1" fill="var(--accent)"/>
+      <line x1="15.5" y1="26" x2="25.5" y2="26" stroke="var(--accent)" strokeWidth="1.6" strokeLinecap="round"/>
+      <line x1="15.5" y1="29.5" x2="25.5" y2="29.5" stroke="var(--accent)" strokeWidth="1.6" strokeLinecap="round"/>
+      <circle cx="20.5" cy="33" r="1.6" fill="var(--accent)"/>
     </svg>
   );
 }
@@ -69,41 +70,59 @@ const IconDelete = () => (
   </svg>
 );
 
-const IconSend = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="white">
-    <path d="M22 2L11 13M22 2L15 22l-4-9-9-4 20-7z"/>
+const IconAntenna = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 2v20"/><path d="M5 8a7 7 0 0 1 14 0"/><path d="M2 5a10 10 0 0 1 20 0"/>
   </svg>
 );
 
+/* ── Signal bars (decorative) ────────────────────────────────────────────── */
+const SignalBars = () => (
+  <span className="lp-signal-bars" aria-hidden="true">
+    <span style={{ height: 5 }} />
+    <span style={{ height: 8 }} />
+    <span style={{ height: 11 }} />
+    <span style={{ height: 14 }} />
+  </span>
+);
+
 /* ── Avatar color map ─────────────────────────────────────────────────────────── */
-const AVATAR_COLORS = ['#d4793a', '#5e87c8', '#56a87a', '#c85e8a', '#8a6ec8'];
+const AVATAR_COLORS = ['#bd4a1e', '#5c6b3f', '#9c7a2e', '#7a4a2e', '#61683f'];
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    Landing Page Component
    ═══════════════════════════════════════════════════════════════════════════════ */
 export default function LandingPage({ isLoggedIn = false, onOpenChat, onGetStarted, onSignIn }) {
 
-  /* ── Chat Mockup ─────────────────────────────────────────────────────────── */
+  /* ── Handset mockup ──────────────────────────────────────────────────────── */
   const MockChat = () => (
     <div className="lp-mockup-wrap">
       <div className="lp-mockup">
-        {/* Sidebar */}
+        <span className="lp-rivet lp-rivet-tl" />
+        <span className="lp-rivet lp-rivet-tr" />
+        <span className="lp-rivet lp-rivet-bl" />
+        <span className="lp-rivet lp-rivet-br" />
+        <span className="lp-antenna" />
+
+        <div className="lp-mockup-inner">
+        {/* Channel list */}
         <div className="lp-mock-sidebar">
           <div className="lp-mock-sidebar-header">
-            <div className="lp-mock-wt-label">WakyTalky</div>
+            <div className="lp-mock-wt-label"><span className="live-dot" /> CHANNELS</div>
           </div>
           {[
-            { name: 'Alex', preview: 'See you then!', color: AVATAR_COLORS[1], active: false },
-            { name: 'Jordan', preview: '🔒 Encrypted', color: AVATAR_COLORS[0], active: true },
-            { name: 'Sam', preview: 'Thanks!', color: AVATAR_COLORS[2], active: false },
-          ].map((c) => (
+            { name: 'Alex', preview: 'See you then', color: AVATAR_COLORS[1], active: false },
+            { name: 'Jordan', preview: 'SCRAMBLED', color: AVATAR_COLORS[0], active: true },
+            { name: 'Sam', preview: 'Thanks', color: AVATAR_COLORS[2], active: false },
+          ].map((c, i) => (
             <div key={c.name} className={`lp-mock-contact${c.active ? ' active' : ''}`}>
               <div className="lp-mock-avatar" style={{ background: c.color }}>
                 {c.name[0]}
               </div>
               <div className="lp-mock-contact-info">
-                <div className="lp-mock-contact-name">{c.name}</div>
-                <div className={`lp-mock-contact-preview${c.preview.startsWith('🔒') ? ' enc' : ''}`}>
+                <div className="lp-mock-contact-name">CH0{i + 1} &middot; {c.name}</div>
+                <div className={`lp-mock-contact-preview${c.preview === 'SCRAMBLED' ? ' enc' : ''}`}>
                   {c.preview}
                 </div>
               </div>
@@ -119,29 +138,26 @@ export default function LandingPage({ isLoggedIn = false, onOpenChat, onGetStart
             </div>
             <div className="lp-mock-chat-title">Jordan</div>
             <div className="lp-mock-enc-badge">
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-              </svg>
-              Encrypted
+              <span className="live-dot" />
+              Scrambled
             </div>
           </div>
 
           <div className="lp-mock-messages">
             <div className="lp-mock-msg recv">
-              Hey! Can we chat privately? 👋
+              Hey! Can we talk on a private channel? 👋
               <div className="lp-mock-msg-time">10:14</div>
             </div>
             <div className="lp-mock-msg sent">
-              Sure — this is end-to-end encrypted, no one else can read this
+              Copy that — this line's end-to-end encrypted, nobody else can decode it
               <div className="lp-mock-msg-time">10:14</div>
             </div>
             <div className="lp-mock-msg recv">
-              Love that. Not even the server? 🔐
+              Not even the relay server? 🔐
               <div className="lp-mock-msg-time">10:15</div>
             </div>
             <div className="lp-mock-msg sent">
-              Correct. Keys never leave your device.
+              Negative. Keys never leave your device.
               <div className="lp-mock-msg-time">10:15</div>
             </div>
             <div className="lp-mock-msg recv">
@@ -151,16 +167,17 @@ export default function LandingPage({ isLoggedIn = false, onOpenChat, onGetStart
           </div>
 
           <div className="lp-mock-input-row">
-            <div className="lp-mock-input">Message Jordan…</div>
-            <div className="lp-mock-send"><IconSend /></div>
+            <div className="lp-mock-input">Type message&hellip;</div>
+            <div className="lp-mock-send">SEND</div>
           </div>
+        </div>
         </div>
       </div>
 
-      {/* Floating lock badge */}
+      {/* Floating status badge */}
       <div className="lp-mockup-lock">
-        <IconShield />
-        Messages encrypted on your device
+        <span className="live-dot" />
+        SQUELCH OFF &middot; LINE SECURE
       </div>
     </div>
   );
@@ -188,25 +205,30 @@ export default function LandingPage({ isLoggedIn = false, onOpenChat, onGetStart
 
       {/* ══ Hero ═════════════════════════════════════════════════════════════ */}
       <section className="lp-hero">
-        <div className="lp-orb lp-orb-a" />
-        <div className="lp-orb lp-orb-b" />
-        <div className="lp-orb lp-orb-c" />
+        <div className="lp-hero-grid" />
+        <div className="lp-hero-vignette" />
+
+        <div className="lp-freq-strip">
+          <span>CH 19</span>
+          <span className="lp-freq-sep">&middot;</span>
+          <span>27.185 MHz</span>
+          <span className="lp-freq-sep">&middot;</span>
+          <span className="lp-freq-live"><span className="live-dot" /> SECURE LINK ACTIVE</span>
+          <SignalBars />
+        </div>
 
         <div className="lp-badge">
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-            strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-          </svg>
+          <IconAntenna />
           End-to-end encrypted
         </div>
 
         <h1 className="lp-headline">
-          Private by<br /><em>design.</em>
+          GO PRIVATE.<br /><em>STAY ENCRYPTED.</em>
         </h1>
 
         <p className="lp-sub">
-          Messages are encrypted on your device before they leave.
-          The server stores only ciphertext — it never sees your words.
+          Messages are encrypted on your device before they ever hit the airwaves.
+          The server only ever stores ciphertext — it can't read a word you send.
         </p>
 
         <div className="lp-hero-ctas">
@@ -221,7 +243,7 @@ export default function LandingPage({ isLoggedIn = false, onOpenChat, onGetStart
           ) : (
             <>
               <button className="lp-btn-cta" onClick={onGetStarted}>
-                Start messaging free
+                Start transmitting — free
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                   strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
@@ -249,7 +271,7 @@ export default function LandingPage({ isLoggedIn = false, onOpenChat, onGetStart
             {[
               {
                 icon: <IconLock />,
-                title: 'Zero-knowledge server',
+                title: 'Zero-knowledge relay',
                 desc: 'Supabase stores only ciphertext, IVs, and ephemeral public keys. Your plaintext never transits the server — not even transiently.',
               },
               {
@@ -260,7 +282,7 @@ export default function LandingPage({ isLoggedIn = false, onOpenChat, onGetStart
               {
                 icon: <IconRealtime />,
                 title: 'Real-time delivery',
-                desc: 'Messages arrive instantly via Supabase Realtime. Delivered and read receipts, plus live typing indicators — all with end-to-end encryption.',
+                desc: 'Messages arrive instantly over the live channel. Delivered and read receipts, plus typing indicators — all end-to-end encrypted.',
               },
               {
                 icon: <IconKey />,
@@ -337,7 +359,7 @@ export default function LandingPage({ isLoggedIn = false, onOpenChat, onGetStart
       {/* ══ CTA banner ═══════════════════════════════════════════════════════ */}
       <section className="lp-cta-banner">
         <div className="lp-cta-banner-inner">
-          <h2>Ready to message privately?</h2>
+          <h2>Ready to go private?</h2>
           <p>Create an account in seconds. No phone number required.</p>
           <div className="lp-cta-banner-btns">
             {isLoggedIn ? (

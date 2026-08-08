@@ -6,7 +6,7 @@ export default function Sidebar({
   return (
     <div className={`sidebar ${selectedContact ? 'show-chat' : ''}`}>
       <div className="sidebar-header">
-        <h2>Chats</h2>
+        <h2>Channels</h2>
         <div className="sidebar-actions">
           <button onClick={toggleDarkMode} className="theme-toggle" title={darkMode ? 'Light mode' : 'Dark mode'}>
             {darkMode ? (
@@ -35,7 +35,7 @@ export default function Sidebar({
       <div className="search-box">
         <input
           type="text"
-          placeholder="Search users..."
+          placeholder="Scan for callsign…"
           value={searchQuery}
           onChange={(e) => { setSearchQuery(e.target.value); searchUsers(e.target.value); }}
         />
@@ -57,14 +57,14 @@ export default function Sidebar({
       )}
 
       {contacts.length > 0 && (
-        <div className="section-header"><h3>Recent Chats</h3></div>
+        <div className="section-header"><h3>Active channels</h3></div>
       )}
 
       <div className="contacts-list">
         {contacts.length === 0 && !searchQuery && (
           <div className="empty-state">
-            <p>No recent chats</p>
-            <p className="hint">Search for users to start chatting</p>
+            <p>No channels active</p>
+            <p className="hint">Scan for a callsign to open a channel</p>
           </div>
         )}
         {contacts
@@ -74,7 +74,7 @@ export default function Sidebar({
             const timeB = b.lastMessageTime ? new Date(b.lastMessageTime) : 0;
             return timeB - timeA;
           })
-          .map(contact => (
+          .map((contact, i) => (
             <div
               key={contact.id}
               className={`contact-item ${selectedContact?.id === contact.id ? 'active' : ''}`}
@@ -88,13 +88,15 @@ export default function Sidebar({
               </div>
               <div className="contact-info">
                 <div className="contact-name-row">
-                  <div className="contact-name">{contact.username}</div>
+                  <div className="contact-name">
+                    <span className="contact-channel-no">CH{String(i + 1).padStart(2, '0')}</span> {contact.username}
+                  </div>
                   {contact.lastMessageTime && (
                     <div className="contact-time">{formatTime(contact.lastMessageTime)}</div>
                   )}
                 </div>
                 <div className="contact-last-message">
-                  {contact.lastMessage || 'Tap to chat'}
+                  {contact.lastMessage || 'Tap to open channel'}
                 </div>
               </div>
             </div>
